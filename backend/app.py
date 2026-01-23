@@ -258,13 +258,13 @@ def rank():
             "habitability_score",
             "confidence"
         ]]
-        .drop_duplicates()
         .sort_values("habitability_score", ascending=False)
+        .drop_duplicates(subset=["planet_name"], keep="first")
+        .reset_index(drop=True)
     )
-    if top_n:
-        ranked = ranked.head(top_n)
 
-        ranked = ranked.reset_index(drop=True)
+    ranked["rank"] = ranked.index + 1
+
 
     ranked["rank"] = ranked.index + 1
     ranked["confidence"] = ranked["confidence"].round(4)
