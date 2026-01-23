@@ -89,6 +89,9 @@ def response(status, message, data=None):
 # -------------------------------------------------
 # ROUTES
 # -------------------------------------------------
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"}), 200
 
 @app.route("/", methods=["GET"])
 def home():
