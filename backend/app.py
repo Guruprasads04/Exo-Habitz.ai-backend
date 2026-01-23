@@ -4,7 +4,7 @@ import pandas as pd
 import sqlite3
 import joblib
 import os
-
+import numpy as np
 app = Flask(__name__)
 CORS(app)
 
@@ -242,10 +242,10 @@ def rank():
     X = df[MODEL_FEATURES]
 
     proba = cls_model.predict_proba(X)[:, 1]
-    probax = proba - 0.1225
+    probax = np.clip(proba - 0.1225, 0.0, 1.0)
 
-    df["habitability_score"] = probax
-    df["confidence"] = proba
+    df["habitability_score"] = probax.round(4)
+    df["confidence"] = proba.round(4)
     df["habitability"] = (proba >= 0.5).astype(int)
 
     habitable_count = int(df["habitability"].sum())
