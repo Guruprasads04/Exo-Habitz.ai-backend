@@ -219,7 +219,7 @@ def predict():
 @app.route("/rank", methods=["GET"])
 @app.route("/rank/", methods=["GET"])
 def rank():
-    top_n = int(request.args.get("top", 10))
+    top_n = request.args.get("top", type=int)
 
     conn = get_db()
     df = pd.read_sql("SELECT * FROM planets", conn)
@@ -260,9 +260,11 @@ def rank():
         ]]
         .drop_duplicates()
         .sort_values("habitability_score", ascending=False)
-        .head(top_n)
-        .reset_index(drop=True)
     )
+    if top_n:
+        ranked = ranked.head(top_n)
+
+        ranked = ranked.reset_index(drop=True)
 
     ranked["rank"] = ranked.index + 1
     ranked["confidence"] = ranked["confidence"].round(4)
