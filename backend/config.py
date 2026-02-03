@@ -2,10 +2,10 @@ import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DB_PATH = os.path.join(BASE_DIR, "database", "exoplanets.db")
-MODELS_DIR = os.path.join(BASE_DIR, "model")
-
 DEBUG = True
+
+# 🔐 Supabase PostgreSQL URL
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # 🔒 Fixed model input schema
 MODEL_FEATURES = [

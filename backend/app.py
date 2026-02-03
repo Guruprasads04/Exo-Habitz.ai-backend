@@ -1,20 +1,22 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pandas as pd
-import sqlite3
 import joblib
 import os
 import numpy as np
-app = Flask(__name__)
-CORS(app)
+from sqlalchemy import create_engine, text
 
-# CONFIGURATION
+# -------------------------------------------------
+# FLASK SETUP
 # -------------------------------------------------
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+app = Flask(__name__)
+CORS(app)
+app.config["DEBUG"] = True
 
-DB_PATH = os.path.join(BASE_DIR, "database", "exoplanets.db")
-MODELS_DIR = os.path.join(BASE_DIR, "model")
+# -------------------------------------------------
+# CONFIG
+# -------------------------------------------------
 
 MODEL_FEATURES = [
     "st_teff",
@@ -27,56 +29,50 @@ MODEL_FEATURES = [
     "pl_insol"
 ]
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError("❌ DATABASE_URL not set")
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
 # -------------------------------------------------
 # LOAD MODELS
 # -------------------------------------------------
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(BASE_DIR, "model")
 
 reg_model = joblib.load(os.path.join(MODELS_DIR, "xgboost_reg.pkl"))
 cls_model = joblib.load(os.path.join(MODELS_DIR, "xgboost_classifier.pkl"))
 
 # -------------------------------------------------
-# FLASK APP
+# INIT DB (SUPABASE)
 # -------------------------------------------------
-
-
-app.config["DEBUG"] = True
-
-# -------------------------------------------------
-# DATABASE
-# -------------------------------------------------
-
-def get_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    return sqlite3.connect(DB_PATH)
 
 def init_db():
-    conn = get_db()
-    cur = conn.cursor()
+    with engine.begin() as conn:
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS planets (
+            id SERIAL PRIMARY KEY,
+            planet_name TEXT UNIQUE,
+            st_teff FLOAT,
+            st_rad FLOAT,
+            st_mass FLOAT,
+            st_met FLOAT,
+            st_luminosity FLOAT,
+            pl_orbper FLOAT,
+            pl_orbeccen FLOAT,
+            pl_insol FLOAT,
+            source TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """))
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS planets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        planet_name TEXT,
-        st_teff REAL,
-        st_rad REAL,
-        st_mass REAL,
-        st_met REAL,
-        st_luminosity REAL,
-        pl_orbper REAL,
-        pl_orbeccen REAL,
-        pl_insol REAL,
-        source TEXT
-    )
-    """)
-
-    conn.commit()
-    conn.close()
-
-# Initialize DB on startup
 init_db()
 
 # -------------------------------------------------
-# HELPER RESPONSE
+# RESPONSE HELPER
 # -------------------------------------------------
 
 def response(status, message, data=None):
@@ -89,9 +85,11 @@ def response(status, message, data=None):
 # -------------------------------------------------
 # ROUTES
 # -------------------------------------------------
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
+
 
 @app.route("/", methods=["GET"])
 def home():
@@ -107,44 +105,25 @@ def home():
 # ---------------- ADD PLANET ----------------
 
 @app.route("/add_planet", methods=["POST"])
-@app.route("/add_planet/", methods=["POST"])
 def add_planet():
     data = request.get_json()
+    planet_name = data.get("planet_name", "Unknown")
 
     try:
-        planet_name = data.get("planet_name", "Unknown")
-
-        conn = get_db()
-        cur = conn.cursor()
-
-        # Check duplicate
-        cur.execute(
-            "SELECT 1 FROM planets WHERE planet_name = ? LIMIT 1",
-            (planet_name,)
-        )
-        exists = cur.fetchone() is not None
-
-        if exists:
-            conn.close()
-            return response(
-                "success",
-                "Planet already exists",
-                {"planet_saved": False}
-            )
-
         row = {
             "planet_name": planet_name,
             **{f: data[f] for f in MODEL_FEATURES},
             "source": "user"
         }
 
-        pd.DataFrame([row]).to_sql(
+        df = pd.DataFrame([row])
+
+        df.to_sql(
             "planets",
-            conn,
+            engine,
             if_exists="append",
             index=False
         )
-        conn.close()
 
         return response(
             "success",
@@ -158,56 +137,40 @@ def add_planet():
 # ---------------- PREDICT ----------------
 
 @app.route("/predict", methods=["POST"])
-@app.route("/predict/", methods=["POST"])
 def predict():
     data = request.get_json()
+    planet_name = data.get("planet_name", "Unknown")
 
     try:
-        planet_name = data.get("planet_name", "Unknown")
-
-        # Prepare model input
         input_df = pd.DataFrame([data])[MODEL_FEATURES]
 
-        # Prediction
         proba = float(cls_model.predict_proba(input_df)[0][1])
-        probax = proba - 0.1225  # dummy operation
+        probax = np.clip(proba - 0.1225, 0.0, 1.0)
         habitability = int(proba >= 0.5)
 
-        conn = get_db()
-        cur = conn.cursor()
+        # Insert (idempotent)
+        row = {
+            "planet_name": planet_name,
+            **{f: data[f] for f in MODEL_FEATURES},
+            "source": "prediction"
+        }
 
-        # Check duplicate
-        cur.execute(
-            "SELECT 1 FROM planets WHERE planet_name = ? LIMIT 1",
-            (planet_name,)
+        pd.DataFrame([row]).to_sql(
+            "planets",
+            engine,
+            if_exists="append",
+            index=False,
+            method="multi"
         )
-        exists = cur.fetchone() is not None
-
-        # Insert only if new
-        if not exists:
-            row = {
-                "planet_name": planet_name,
-                **{f: data[f] for f in MODEL_FEATURES},
-                "source": "prediction"
-            }
-
-            pd.DataFrame([row]).to_sql(
-                "planets",
-                conn,
-                if_exists="append",
-                index=False
-            )
-
-        conn.close()
 
         return response(
             "success",
-            "Prediction generated" + (" (planet already exists)" if exists else " and planet saved"),
+            "Prediction generated and saved",
             {
                 "habitability": habitability,
                 "habitability_score": round(probax, 4),
                 "confidence": round(proba, 4),
-                "planet_saved": not exists
+                "planet_saved": True
             }
         )
 
@@ -217,15 +180,10 @@ def predict():
 # ---------------- RANK ----------------
 
 @app.route("/rank", methods=["GET"])
-@app.route("/rank/", methods=["GET"])
 def rank():
     top_n = request.args.get("top", type=int)
 
-    conn = get_db()
-    df = pd.read_sql("SELECT * FROM planets", conn)
-    conn.close()
-
-    total_count = len(df)
+    df = pd.read_sql("SELECT * FROM planets", engine)
 
     if df.empty:
         return response(
@@ -248,54 +206,33 @@ def rank():
     df["confidence"] = proba.round(4)
     df["habitability"] = (proba >= 0.5).astype(int)
 
-    habitable_count = int(df["habitability"].sum())
-    average_score = float(df["habitability_score"].mean())
-
     ranked = (
-        df[[
-            "planet_name",
-            "habitability",
-            "habitability_score",
-            "confidence"
-        ]]
+        df[["planet_name", "habitability", "habitability_score", "confidence"]]
         .sort_values("habitability_score", ascending=False)
-        .drop_duplicates(subset=["planet_name"], keep="first")
+        .drop_duplicates(subset=["planet_name"])
         .reset_index(drop=True)
     )
 
     ranked["rank"] = ranked.index + 1
 
-
-    ranked["rank"] = ranked.index + 1
-    ranked["confidence"] = ranked["confidence"].round(4)
-    ranked["habitability_score"] = ranked["habitability_score"].round(4)
-    ranked["habitability"] = ranked["habitability"].astype(int)
+    if top_n:
+        ranked = ranked.head(top_n)
 
     return response(
         "success",
         "Ranking generated",
         {
-            "total_count": total_count,
-            "habitable_count": habitable_count,
-            "average_score": round(average_score, 4),
+            "total_count": len(df),
+            "habitable_count": int(df["habitability"].sum()),
+            "average_score": float(df["habitability_score"].mean()),
             "data": ranked.to_dict("records")
         }
     )
 
-
-
-# -------------------------------------------------
-# DEBUG INFO
-# -------------------------------------------------
-
-print("✅ FINAL app.py (DUPLICATE-SAFE, PRODUCTION-READY)")
-print(app.url_map)
-
 # -------------------------------------------------
 # RUN
 # -------------------------------------------------
+
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
