@@ -69,7 +69,10 @@ def init_db():
         );
         """))
 
-init_db()
+try:
+    init_db()
+except Exception as e:
+    print("⚠️ DB init skipped:", e)
 
 # -------------------------------------------------
 # RESPONSE HELPER
